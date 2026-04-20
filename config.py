@@ -33,6 +33,7 @@ SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "48000"))  # USB mic native
 
 SILENCE_THRESHOLD = int(os.getenv("SILENCE_THRESHOLD", "500"))  # RMS value
 SILENCE_DURATION = float(os.getenv("SILENCE_DURATION", "1.5"))  # seconds
+MIN_RECORD_SECONDS = float(os.getenv("MIN_RECORD_SECONDS", "2.0"))  # grace period
 MAX_RECORD_SECONDS = int(os.getenv("MAX_RECORD_SECONDS", "30"))
 
 # ---------------------------------------------------------------------------

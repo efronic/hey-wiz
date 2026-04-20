@@ -127,7 +127,9 @@ def record_command() -> np.ndarray:
     log.info("Recording command…")
     frames: list[np.ndarray] = []
     silence_start: float | None = None
-    max_end = time.monotonic() + config.MAX_RECORD_SECONDS
+    record_start = time.monotonic()
+    max_end = record_start + config.MAX_RECORD_SECONDS
+    grace_end = record_start + config.MIN_RECORD_SECONDS
 
     # 2. Add device=config.MIC_DEVICE so it knows which mic to use
     with sd.InputStream(
@@ -143,6 +145,11 @@ def record_command() -> np.ndarray:
                 log.warning("Record status: %s", status)
 
             frames.append(chunk[:, 0].copy())
+
+            # Skip silence detection during the grace period so the
+            # user has time to start speaking after the wake word.
+            if time.monotonic() < grace_end:
+                continue
 
             rms = np.sqrt(np.mean(chunk.astype(np.float32) ** 2))
             if rms < config.SILENCE_THRESHOLD:
