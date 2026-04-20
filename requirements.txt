@@ -1,0 +1,8 @@
+openwakeword
+sounddevice
+numpy
+whispercpp
+picamera2
+httpx
+python-dotenv
+piper-tts
