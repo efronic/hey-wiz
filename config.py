@@ -94,8 +94,11 @@ COMMAND_TAGS: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 # OpenClaw
 # ---------------------------------------------------------------------------
+OPENCLAW_GW_URL = os.getenv("OPENCLAW_GW_URL", "ws://127.0.0.1:18789")
+OPENCLAW_GW_ORIGIN = os.getenv("OPENCLAW_GW_ORIGIN", "http://192.168.50.18:18789")
+OPENCLAW_TOKEN = os.getenv("OPENCLAW_TOKEN", "")
 OPENCLAW_SESSION_ID = os.getenv("OPENCLAW_SESSION_ID", "wiz-voice")
-OPENCLAW_TIMEOUT = int(os.getenv("OPENCLAW_TIMEOUT", "120"))
+OPENCLAW_TIMEOUT = int(os.getenv("OPENCLAW_TIMEOUT", "60"))
 
 # ---------------------------------------------------------------------------
 # Piper TTS

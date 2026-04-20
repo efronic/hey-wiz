@@ -6,9 +6,11 @@ import base64
 import json
 import logging
 import re
-import subprocess
+import asyncio
+import uuid
 
 import httpx
+import websockets
 
 import config
 
@@ -126,50 +128,108 @@ async def _call_openai(image_b64: str, vision_prompt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# OpenClaw handoff
+# OpenClaw gateway WebSocket client
 # ---------------------------------------------------------------------------
 
+async def _gw_connect() -> websockets.WebSocketClientProtocol:
+    """Open an authenticated WebSocket to the OpenClaw gateway."""
+    ws = await websockets.connect(
+        config.OPENCLAW_GW_URL,
+        open_timeout=5,
+        additional_headers={"Origin": config.OPENCLAW_GW_ORIGIN},
+    )
+    # Consume challenge
+    challenge = json.loads(await ws.recv())
+    if challenge.get("event") != "connect.challenge":
+        raise RuntimeError(f"Unexpected gateway greeting: {challenge}")
+
+    req_id = str(uuid.uuid4())
+    await ws.send(json.dumps({
+        "type": "req",
+        "id": req_id,
+        "method": "connect",
+        "params": {
+            "minProtocol": 3,
+            "maxProtocol": 3,
+            "client": {
+                "id": "openclaw-control-ui",
+                "version": "1.0.0",
+                "platform": "linux-aarch64",
+                "mode": "webchat",
+            },
+            "role": "operator",
+            "scopes": ["operator.read", "operator.write", "operator.admin"],
+            "auth": {"token": config.OPENCLAW_TOKEN},
+            "caps": [],
+        },
+    }))
+    resp = json.loads(await ws.recv())
+    if not resp.get("ok"):
+        err = resp.get("error", {}).get("message", "unknown")
+        raise RuntimeError(f"Gateway auth failed: {err}")
+    return ws
+
+
 async def _call_openclaw(prompt: str) -> str:
-    """Invoke the OpenClaw agent CLI and return its text response."""
-    cmd = [
-        "openclaw", "agent",
-        "--session-id", config.OPENCLAW_SESSION_ID,
-        "--message", prompt,
-        "--json",
-    ]
-    log.debug("Running: %s", " ".join(cmd))
+    """Send a message via the OpenClaw gateway WebSocket and return the reply."""
+    log.info("Calling OpenClaw gateway (session=%s)…", config.OPENCLAW_SESSION_ID)
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=config.OPENCLAW_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        log.error("OpenClaw agent timed out after %ds", config.OPENCLAW_TIMEOUT)
+        ws = await _gw_connect()
+    except Exception as exc:
+        log.error("Gateway connect failed: %s", exc)
+        return "Sorry, I couldn't connect to OpenClaw."
+
+    try:
+        chat_id = str(uuid.uuid4())
+        await ws.send(json.dumps({
+            "type": "req",
+            "id": chat_id,
+            "method": "chat.send",
+            "params": {
+                "sessionKey": f"agent:main:explicit:{config.OPENCLAW_SESSION_ID}",
+                "message": prompt,
+                "deliver": False,
+                "idempotencyKey": str(uuid.uuid4()),
+            },
+        }))
+
+        # Listen for the assistant's final message
+        deadline = asyncio.get_event_loop().time() + config.OPENCLAW_TIMEOUT
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                log.error("OpenClaw timed out after %ds", config.OPENCLAW_TIMEOUT)
+                return "Sorry, I timed out waiting for a response."
+
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+            msg = json.loads(raw)
+
+            if msg.get("type") != "event":
+                continue
+
+            payload = msg.get("payload", {})
+            state = payload.get("state", "")
+            message = payload.get("message", {})
+
+            if state == "final" and message.get("role") == "assistant":
+                content = message.get("content", "")
+                # content is either a string or a list of blocks
+                if isinstance(content, list):
+                    parts = [b["text"] for b in content if b.get("type") == "text"]
+                    text = " ".join(parts).strip()
+                else:
+                    text = str(content).strip()
+                log.info("OpenClaw responded (%d chars)", len(text))
+                return text or "No response from OpenClaw."
+
+    except asyncio.TimeoutError:
+        log.error("OpenClaw timed out after %ds", config.OPENCLAW_TIMEOUT)
         return "Sorry, I timed out waiting for a response."
-
-    if proc.returncode != 0:
-        log.error("OpenClaw agent failed (rc=%d): %s", proc.returncode, proc.stderr)
+    except Exception as exc:
+        log.error("OpenClaw error: %s", exc)
         return "Sorry, something went wrong talking to OpenClaw."
-
-    # OpenClaw sends JSON to stderr (after gateway warnings); fall back to stdout
-    raw = proc.stderr or proc.stdout
-    json_start = raw.find("{")
-    if json_start == -1:
-        log.error("No JSON in openclaw output: %s", raw[:200])
-        return "Sorry, I couldn't parse the response."
-
-    try:
-        data = json.loads(raw[json_start:])
-    except json.JSONDecodeError as exc:
-        log.error("JSON parse error: %s — raw: %s", exc, raw[:300])
-        return "Sorry, I couldn't parse the response."
-
-    payloads = data.get("payloads", [])
-    if payloads:
-        return payloads[0].get("text", "").strip()
-    return "No response from OpenClaw."
+    finally:
+        await ws.close()
 
 
 # ---------------------------------------------------------------------------

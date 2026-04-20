@@ -4,5 +4,6 @@ numpy
 faster-whisper
 picamera2
 httpx
+websockets
 python-dotenv
 piper-tts
