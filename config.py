@@ -50,20 +50,43 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 VISION_MODEL_ANTHROPIC = os.getenv("VISION_MODEL_ANTHROPIC", "claude-sonnet-4-20250514")
 VISION_MODEL_OPENAI = os.getenv("VISION_MODEL_OPENAI", "gpt-4o")
 
-VISION_PROMPT = (
-    "Analyze this image. If it shows a movie or TV show, return ONLY the "
-    "exact title of that movie/show. If it's something else, return a brief "
-    "factual description."
-)
-
-VISION_INTENT_KEYWORDS = [
-    "look at",
-    "what is this",
-    "identify",
-    "show me",
-    "what do you see",
-    "can you see",
-]
+# ---------------------------------------------------------------------------
+# Command Tags — tag-based routing for predefined skills
+#
+# Each tag maps to a routine.  The user prefixes their voice command with
+# the tag keyword (e.g. "IMDB") and the system runs the matching pipeline.
+# No tag → pass-through to OpenClaw as a general assistant.
+#
+# Fields:
+#   triggers      – list of spoken keywords that activate the tag
+#   needs_vision  – whether the routine requires a camera capture
+#   vision_prompt – prompt sent to the Vision API (only if needs_vision)
+#   openclaw_template – prompt template for OpenClaw; {result} is replaced
+#                       with the Vision API output (or empty string)
+# ---------------------------------------------------------------------------
+COMMAND_TAGS: dict[str, dict] = {
+    "imdb": {
+        "triggers": ["imdb"],
+        "needs_vision": True,
+        "vision_prompt": (
+            "Analyze this image. If it shows a movie or TV show, return "
+            "ONLY the exact title of that movie/show. If it's something "
+            "else, return a brief factual description."
+        ),
+        "openclaw_template": (
+            "Using the agent-browser skill, go to imdb.com, search for "
+            "{result}, read the accessibility tree, and return only the "
+            "IMDB rating and Metascore as a natural language string."
+        ),
+    },
+    # Add more tags here, e.g.:
+    # "identify": {
+    #     "triggers": ["identify", "what is this"],
+    #     "needs_vision": True,
+    #     "vision_prompt": "Describe what you see in this image in one sentence.",
+    #     "openclaw_template": "{result}",
+    # },
+}
 
 # ---------------------------------------------------------------------------
 # OpenClaw

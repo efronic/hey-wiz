@@ -1,7 +1,10 @@
-"""Brain bridge: intent routing, Vision API calls, and OpenClaw handoff."""
+"""Brain bridge: tag-based command routing, Vision API, and OpenClaw handoff."""
+
+from __future__ import annotations
 
 import base64
 import logging
+import re
 
 import httpx
 
@@ -14,32 +17,45 @@ OPENCLAW_TIMEOUT = 120.0
 
 
 # ---------------------------------------------------------------------------
-# Intent detection
+# Tag matching
 # ---------------------------------------------------------------------------
 
-def _detect_vision_intent(text: str) -> bool:
-    lower = text.lower()
-    return any(kw in lower for kw in config.VISION_INTENT_KEYWORDS)
+def _match_command_tag(text: str) -> tuple[dict, str] | tuple[None, str]:
+    """Check whether *text* starts with a known command-tag trigger.
+
+    Returns ``(tag_config, remaining_text)`` on match, or
+    ``(None, original_text)`` when no tag is recognised.
+    """
+    lower = text.lower().strip()
+    for tag_name, tag_cfg in config.COMMAND_TAGS.items():
+        for trigger in tag_cfg["triggers"]:
+            pattern = re.compile(rf"^{re.escape(trigger)}\b[,:\s]*", re.IGNORECASE)
+            m = pattern.match(lower)
+            if m:
+                remainder = text[m.end():].strip()
+                log.info("Matched command tag '%s' (trigger='%s')", tag_name, trigger)
+                return tag_cfg, remainder
+    return None, text
 
 
 # ---------------------------------------------------------------------------
 # Vision API
 # ---------------------------------------------------------------------------
 
-async def _call_vision_api(image_path: str) -> str:
+async def _call_vision_api(image_path: str, vision_prompt: str) -> str:
     """Send image to the configured Vision API and return the description."""
     with open(image_path, "rb") as f:
         image_b64 = base64.b64encode(f.read()).decode()
 
     if config.VISION_PROVIDER == "anthropic":
-        return await _call_anthropic(image_b64)
+        return await _call_anthropic(image_b64, vision_prompt)
     elif config.VISION_PROVIDER == "openai":
-        return await _call_openai(image_b64)
+        return await _call_openai(image_b64, vision_prompt)
     else:
         raise ValueError(f"Unknown VISION_PROVIDER: {config.VISION_PROVIDER}")
 
 
-async def _call_anthropic(image_b64: str) -> str:
+async def _call_anthropic(image_b64: str, vision_prompt: str) -> str:
     payload = {
         "model": config.VISION_MODEL_ANTHROPIC,
         "max_tokens": 256,
@@ -55,7 +71,7 @@ async def _call_anthropic(image_b64: str) -> str:
                             "data": image_b64,
                         },
                     },
-                    {"type": "text", "text": config.VISION_PROMPT},
+                    {"type": "text", "text": vision_prompt},
                 ],
             }
         ],
@@ -75,7 +91,7 @@ async def _call_anthropic(image_b64: str) -> str:
     return data["content"][0]["text"].strip()
 
 
-async def _call_openai(image_b64: str) -> str:
+async def _call_openai(image_b64: str, vision_prompt: str) -> str:
     payload = {
         "model": config.VISION_MODEL_OPENAI,
         "max_tokens": 256,
@@ -89,7 +105,7 @@ async def _call_openai(image_b64: str) -> str:
                             "url": f"data:image/jpeg;base64,{image_b64}",
                         },
                     },
-                    {"type": "text", "text": config.VISION_PROMPT},
+                    {"type": "text", "text": vision_prompt},
                 ],
             }
         ],
@@ -135,24 +151,31 @@ async def _call_openclaw(prompt: str) -> str:
 # ---------------------------------------------------------------------------
 
 async def process(transcription: str) -> str:
-    """Route a transcription through vision (if needed) and OpenClaw.
+    """Route a transcription through the tag system and OpenClaw.
+
+    1. Match a command tag  →  run its pipeline (vision + templated prompt).
+    2. No tag matched       →  forward verbatim to OpenClaw (general assistant).
 
     Returns the final text response to be spoken.
     """
     log.info("Processing: %s", transcription)
 
-    if _detect_vision_intent(transcription):
-        log.info("Vision intent detected — capturing image.")
-        from vision_capture import capture_image
+    tag_cfg, remainder = _match_command_tag(transcription)
 
-        image_path = capture_image()
-        title = await _call_vision_api(image_path)
-        log.info("Vision API returned: %s", title)
+    if tag_cfg is not None:
+        result = ""
 
-        prompt = (
-            f"Using the agent-browser skill, go to imdb.com, search for "
-            f"{title}, read the accessibility tree, and return only the "
-            f"IMDB rating and Metascore as a natural language string."
+        if tag_cfg["needs_vision"]:
+            log.info("Tag requires vision — capturing image.")
+            from vision_capture import capture_image
+
+            image_path = capture_image()
+            result = await _call_vision_api(image_path, tag_cfg["vision_prompt"])
+            log.info("Vision API returned: %s", result)
+
+        prompt = tag_cfg["openclaw_template"].format(
+            result=result,
+            remainder=remainder,
         )
     else:
         prompt = transcription
