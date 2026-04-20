@@ -24,18 +24,21 @@ WAKE_WORD_THRESHOLD = float(os.getenv("WAKE_WORD_THRESHOLD", "0.5"))
 # ---------------------------------------------------------------------------
 # Audio
 # ---------------------------------------------------------------------------
-SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "48000"))          # USB mic native
-WHISPER_SAMPLE_RATE = 16000                                    # Whisper expects 16 kHz
-DOWNSAMPLE_FACTOR = SAMPLE_RATE // WHISPER_SAMPLE_RATE         # 3
-CHUNK_SAMPLES = 1280                                           # ~26 ms at 48 kHz
+SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "48000"))  # USB mic native
+WHISPER_SAMPLE_RATE = 16000  # Whisper expects 16 kHz
+DOWNSAMPLE_FACTOR = SAMPLE_RATE // WHISPER_SAMPLE_RATE  # 3
+CHUNK_SAMPLES = 15360  # 320ms buffer to prevent input overflow
+MIC_DEVICE = 0
+SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "48000"))  # USB mic native
 
-SILENCE_THRESHOLD = int(os.getenv("SILENCE_THRESHOLD", "500")) # RMS value
-SILENCE_DURATION = float(os.getenv("SILENCE_DURATION", "1.5")) # seconds
+SILENCE_THRESHOLD = int(os.getenv("SILENCE_THRESHOLD", "500"))  # RMS value
+SILENCE_DURATION = float(os.getenv("SILENCE_DURATION", "1.5"))  # seconds
 MAX_RECORD_SECONDS = int(os.getenv("MAX_RECORD_SECONDS", "30"))
 
 # ---------------------------------------------------------------------------
 # Whisper STT
 # ---------------------------------------------------------------------------
+WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "base.en")
 WHISPER_MODEL_PATH = os.getenv(
     "WHISPER_MODEL_PATH",
     str(MODELS_DIR / "ggml-base.en.bin"),
@@ -44,7 +47,7 @@ WHISPER_MODEL_PATH = os.getenv(
 # ---------------------------------------------------------------------------
 # Vision
 # ---------------------------------------------------------------------------
-VISION_PROVIDER = os.getenv("VISION_PROVIDER", "anthropic")    # "anthropic" | "openai"
+VISION_PROVIDER = os.getenv("VISION_PROVIDER", "anthropic")  # "anthropic" | "openai"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 VISION_MODEL_ANTHROPIC = os.getenv("VISION_MODEL_ANTHROPIC", "claude-sonnet-4-20250514")

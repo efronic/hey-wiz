@@ -5,6 +5,7 @@ import threading
 import time
 
 import numpy as np
+import openwakeword
 import sounddevice as sd
 from openwakeword.model import Model as WakeWordModel
 
@@ -18,21 +19,33 @@ log = logging.getLogger(__name__)
 _oww_model: WakeWordModel | None = None
 _wake_event = threading.Event()
 _listening = False
+_mic_stream = None
 
 
 def init() -> None:
     """Pre-load the openwakeword model (call once at startup)."""
     global _oww_model
     log.info("Loading wake-word model: %s", config.WAKE_WORD_MODEL)
-    _oww_model = WakeWordModel(
-        wakeword_models=[config.WAKE_WORD_MODEL],
-        inference_framework="onnx",
-    )
+
+    # Get the absolute file paths to all bundled pre-trained ONNX models
+    model_paths = openwakeword.get_pretrained_model_paths()
+
+    # Find the specific path that contains "hey_jarvis"
+    target_path = next((p for p in model_paths if config.WAKE_WORD_MODEL in p), None)
+
+    if not target_path:
+        raise ValueError(
+            f"Could not find pre-trained model for {config.WAKE_WORD_MODEL}"
+        )
+
+    # Initialize the model using the exact absolute file path
+    _oww_model = WakeWordModel(wakeword_model_paths=[target_path])
 
 
 # ---------------------------------------------------------------------------
 # Wake word listener (runs on a daemon thread)
 # ---------------------------------------------------------------------------
+
 
 def _audio_callback(indata: np.ndarray, frames: int, time_info, status) -> None:
     """sounddevice callback — feed chunks to openwakeword."""
@@ -41,8 +54,8 @@ def _audio_callback(indata: np.ndarray, frames: int, time_info, status) -> None:
     if not _listening or _oww_model is None:
         return
 
-    # openwakeword expects int16 mono
-    chunk = indata[:, 0].copy()
+    # openwakeword expects int16 mono at 16kHz!
+    chunk = indata[:: config.DOWNSAMPLE_FACTOR, 0].copy()
     prediction = _oww_model.predict(chunk)
 
     for wake_word, score in prediction.items():
@@ -54,43 +67,71 @@ def _audio_callback(indata: np.ndarray, frames: int, time_info, status) -> None:
 
 
 def start_listening() -> None:
-    """Open the mic stream and begin wake-word detection on a background thread."""
-    global _listening
+    """Open the mic stream and begin wake-word detection."""
+    global _listening, _mic_stream
     if _oww_model is None:
         raise RuntimeError("Call init() before start_listening()")
 
+    # 1. Reset the logic state
     _listening = True
-    _wake_event.clear()
+    _wake_event.clear()  # <--- YOUR EXCELLENT CATCH: Reset the "switch"
 
-    stream = sd.InputStream(
+    # 2. If a stream is already hanging around, kill it properly first
+    if _mic_stream is not None:
+        try:
+            _mic_stream.stop()
+            _mic_stream.close()
+        except:
+            pass
+        _mic_stream = None
+
+    # 3. Open the fresh hardware cÏonnection
+    _mic_stream = sd.InputStream(
+        device=config.MIC_DEVICE,
         samplerate=config.SAMPLE_RATE,
         channels=1,
         dtype="int16",
         blocksize=config.CHUNK_SAMPLES,
+        latency=0.5,
         callback=_audio_callback,
     )
-    stream.start()
+    _mic_stream.start()
     log.info("Wake-word listener active (model=%s)", config.WAKE_WORD_MODEL)
 
 
 def wait_for_wake() -> None:
     """Block until the wake word is detected."""
-    _wake_event.wait()
-    _wake_event.clear()
+    import sys
+    # Loop in 100ms increments so we can catch the shutdown signal from main.py
+    while not getattr(sys.modules['__main__'], '_shutdown', False):
+        if _wake_event.wait(timeout=0.1):
+            _wake_event.clear()
+            return
 
 
 # ---------------------------------------------------------------------------
 # Voice command recording
 # ---------------------------------------------------------------------------
 
+
 def record_command() -> np.ndarray:
     """Record audio until silence is detected. Returns int16 numpy array."""
+    global _mic_stream
+    
+    # 1. Stop the background wake-word listener so the mic is free
+    if _mic_stream is not None:
+        _mic_stream.stop()
+        _mic_stream.close()
+        _mic_stream = None
+
     log.info("Recording command…")
     frames: list[np.ndarray] = []
     silence_start: float | None = None
     max_end = time.monotonic() + config.MAX_RECORD_SECONDS
 
+    # 2. Add device=config.MIC_DEVICE so it knows which mic to use
     with sd.InputStream(
+        device=config.MIC_DEVICE,
         samplerate=config.SAMPLE_RATE,
         channels=1,
         dtype="int16",
@@ -114,7 +155,13 @@ def record_command() -> np.ndarray:
                 silence_start = None
 
     audio = np.concatenate(frames)
-    log.info("Recorded %d samples (%.1f s)", len(audio), len(audio) / config.SAMPLE_RATE)
+    log.info(
+        "Recorded %d samples (%.1f s)", len(audio), len(audio) / config.SAMPLE_RATE
+    )
+
+    # 3. Restart the wake-word listener so Wiz can hear "Hey Jarvis" again
+    start_listening()
+    
     return audio
 
 
@@ -122,8 +169,29 @@ def record_command() -> np.ndarray:
 # Whisper STT
 # ---------------------------------------------------------------------------
 
+
+_whisper_model = None
+
+
+def init_whisper() -> None:
+    """Pre-load the faster-whisper model (call once at startup)."""
+    global _whisper_model
+    from faster_whisper import WhisperModel
+
+    log.info("Loading Whisper model: %s", config.WHISPER_MODEL_NAME)
+    _whisper_model = WhisperModel(
+        config.WHISPER_MODEL_NAME,
+        device="cpu",
+        compute_type="int8",
+    )
+
+
 def transcribe(audio: np.ndarray) -> str:
     """Downsample 48 kHz int16 → 16 kHz float32 and run Whisper STT."""
+    global _whisper_model
+    if _whisper_model is None:
+        init_whisper()
+
     # Downsample by factor 3 (48000 → 16000)
     downsampled = audio[:: config.DOWNSAMPLE_FACTOR]
 
@@ -132,47 +200,8 @@ def transcribe(audio: np.ndarray) -> str:
 
     log.info("Transcribing %d samples with Whisper…", len(audio_f32))
 
-    try:
-        from whispercpp import Whisper  # type: ignore[import-untyped]
-
-        w = Whisper.from_pretrained(config.WHISPER_MODEL_PATH)
-        result = w.transcribe(audio_f32)
-        text = result.strip()
-    except Exception:
-        log.warning("whispercpp binding failed, falling back to subprocess")
-        text = _transcribe_subprocess(audio_f32)
+    segments, _info = _whisper_model.transcribe(audio_f32, beam_size=1)
+    text = " ".join(seg.text.strip() for seg in segments).strip()
 
     log.info("Transcription: %s", text)
     return text
-
-
-def _transcribe_subprocess(audio_f32: np.ndarray) -> str:
-    """Fallback: write temp WAV and invoke the whisper-cpp binary."""
-    import subprocess
-    import tempfile
-    import wave
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    try:
-        with wave.open(tmp.name, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(config.WHISPER_SAMPLE_RATE)
-            wf.writeframes((audio_f32 * 32767).astype(np.int16).tobytes())
-
-        result = subprocess.run(
-            [
-                "whisper-cpp",
-                "-m", config.WHISPER_MODEL_PATH,
-                "-f", tmp.name,
-                "--no-timestamps",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=True,
-        )
-        return result.stdout.strip()
-    finally:
-        import os
-        os.unlink(tmp.name)

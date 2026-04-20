@@ -1,7 +1,7 @@
 openwakeword
 sounddevice
 numpy
-whispercpp
+faster-whisper
 picamera2
 httpx
 python-dotenv

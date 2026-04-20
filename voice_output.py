@@ -33,7 +33,7 @@ def speak(text: str) -> None:
     cmd = (
         f'echo {_shell_quote(text)} | '
         f'{config.PIPER_BINARY} --model {config.PIPER_MODEL_PATH} --output_raw | '
-        f'aplay -r 22050 -f S16_LE -t raw -q'
+        f'aplay -D plughw:3,0 -r 22050 -f S16_LE -t raw -q'
     )
     try:
         subprocess.run(cmd, shell=True, check=True, timeout=30)
