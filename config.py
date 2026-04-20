@@ -28,8 +28,7 @@ SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "48000"))  # USB mic native
 WHISPER_SAMPLE_RATE = 16000  # Whisper expects 16 kHz
 DOWNSAMPLE_FACTOR = SAMPLE_RATE // WHISPER_SAMPLE_RATE  # 3
 CHUNK_SAMPLES = 15360  # 320ms buffer to prevent input overflow
-MIC_DEVICE = 0
-SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "48000"))  # USB mic native
+MIC_DEVICE = None  # None = system default; override with int index if needed
 
 SILENCE_THRESHOLD = int(os.getenv("SILENCE_THRESHOLD", "500"))  # RMS value
 SILENCE_DURATION = float(os.getenv("SILENCE_DURATION", "1.5"))  # seconds
