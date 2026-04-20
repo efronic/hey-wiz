@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import re
+import subprocess
 
 import httpx
 
@@ -13,7 +15,6 @@ import config
 log = logging.getLogger(__name__)
 
 VISION_API_TIMEOUT = 30.0
-OPENCLAW_TIMEOUT = 120.0
 
 
 # ---------------------------------------------------------------------------
@@ -129,21 +130,46 @@ async def _call_openai(image_b64: str, vision_prompt: str) -> str:
 # ---------------------------------------------------------------------------
 
 async def _call_openclaw(prompt: str) -> str:
-    """POST to the local OpenClaw instance with Bearer auth."""
-    payload = {
-        "model": config.OPENCLAW_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
-    }
-    headers = {
-        "Authorization": f"Bearer {config.OPENCLAW_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=OPENCLAW_TIMEOUT) as client:
-        resp = await client.post(config.OPENCLAW_URL, json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-    return data["choices"][0]["message"]["content"].strip()
+    """Invoke the OpenClaw agent CLI and return its text response."""
+    cmd = [
+        "openclaw", "agent",
+        "--session-id", config.OPENCLAW_SESSION_ID,
+        "--message", prompt,
+        "--json",
+    ]
+    log.debug("Running: %s", " ".join(cmd))
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=config.OPENCLAW_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        log.error("OpenClaw agent timed out after %ds", config.OPENCLAW_TIMEOUT)
+        return "Sorry, I timed out waiting for a response."
+
+    if proc.returncode != 0:
+        log.error("OpenClaw agent failed (rc=%d): %s", proc.returncode, proc.stderr)
+        return "Sorry, something went wrong talking to OpenClaw."
+
+    # OpenClaw sends JSON to stderr (after gateway warnings); fall back to stdout
+    raw = proc.stderr or proc.stdout
+    json_start = raw.find("{")
+    if json_start == -1:
+        log.error("No JSON in openclaw output: %s", raw[:200])
+        return "Sorry, I couldn't parse the response."
+
+    try:
+        data = json.loads(raw[json_start:])
+    except json.JSONDecodeError as exc:
+        log.error("JSON parse error: %s — raw: %s", exc, raw[:300])
+        return "Sorry, I couldn't parse the response."
+
+    payloads = data.get("payloads", [])
+    if payloads:
+        return payloads[0].get("text", "").strip()
+    return "No response from OpenClaw."
 
 
 # ---------------------------------------------------------------------------
