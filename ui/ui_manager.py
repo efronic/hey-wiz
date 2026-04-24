@@ -158,7 +158,9 @@ class UIManager:
 
             status = f"Status: {state.value.upper()} ({used_driver})"
             text_surface = font_small.render(status, True, (100, 100, 100))
-            text_rect = text_surface.get_rect(center=(self.width // 2, self.height - 20))
+            text_rect = text_surface.get_rect(
+                center=(self.width // 2, self.height - 20)
+            )
             screen.blit(text_surface, text_rect)
 
             try:
@@ -203,11 +205,15 @@ class UIManager:
         if is_blinking and "winking" in self._faces:
             self._blit_face(screen, "winking")
         elif not self._blit_face(screen, "happy"):
-            self._draw_procedural_face(screen, eyes_closed=is_blinking, mouth_openness=0.0)
+            self._draw_procedural_face(
+                screen, eyes_closed=is_blinking, mouth_openness=0.0
+            )
 
     def _render_listening(self, screen):
         if not self._blit_face(screen, "happy_eye_glistening"):
-            self._draw_procedural_face(screen, eyes_closed=False, mouth_openness=0.0, eye_scale=1.3)
+            self._draw_procedural_face(
+                screen, eyes_closed=False, mouth_openness=0.0, eye_scale=1.3
+            )
 
     def _render_thinking(self, screen):
         if not self._blit_face(screen, "thinking"):
@@ -238,7 +244,9 @@ class UIManager:
         screen.blit(overlay, (0, 0))
 
         text = font.render("Error", True, (255, 100, 100))
-        screen.blit(text, text.get_rect(center=(self.width // 2, self.height // 2 + 150)))
+        screen.blit(
+            text, text.get_rect(center=(self.width // 2, self.height // 2 + 150))
+        )
 
     def _draw_procedural_face(
         self,
@@ -258,20 +266,34 @@ class UIManager:
         pygame.draw.ellipse(
             screen,
             self.accent_color,
-            (cx - spacing - eye_width // 2, eye_y - eye_height // 2, eye_width, eye_height),
+            (
+                cx - spacing - eye_width // 2,
+                eye_y - eye_height // 2,
+                eye_width,
+                eye_height,
+            ),
             3,
         )
         pygame.draw.ellipse(
             screen,
             self.accent_color,
-            (cx + spacing - eye_width // 2, eye_y - eye_height // 2, eye_width, eye_height),
+            (
+                cx + spacing - eye_width // 2,
+                eye_y - eye_height // 2,
+                eye_width,
+                eye_height,
+            ),
             3,
         )
 
         if not eyes_closed:
             pupil_size = int(15 * eye_scale)
-            pygame.draw.circle(screen, self.accent_color, (cx - spacing, eye_y), pupil_size)
-            pygame.draw.circle(screen, self.accent_color, (cx + spacing, eye_y), pupil_size)
+            pygame.draw.circle(
+                screen, self.accent_color, (cx - spacing, eye_y), pupil_size
+            )
+            pygame.draw.circle(
+                screen, self.accent_color, (cx + spacing, eye_y), pupil_size
+            )
 
         mouth_y = cy + 60
         mouth_w = 100

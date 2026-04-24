@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from queue import Empty, Queue
 import re
 import subprocess
+from pathlib import Path
+from queue import Empty, Queue
 from threading import Event, Thread
 from typing import Callable, Optional
 
@@ -14,8 +14,8 @@ import numpy as np
 import sounddevice as sd
 
 try:
-    from openwakeword.model import Model
     import openwakeword
+    from openwakeword.model import Model
 
     OPENWAKEWORD_AVAILABLE = True
 except ImportError:
@@ -39,7 +39,10 @@ def _find_mic_device(name_substring: str) -> Optional[int]:
 
     default_index = sd.default.device[0] if sd.default.device else None
     if isinstance(default_index, int) and default_index >= 0:
-        if default_index < len(devices) and devices[default_index].get("max_input_channels", 0) > 0:
+        if (
+            default_index < len(devices)
+            and devices[default_index].get("max_input_channels", 0) > 0
+        ):
             log.warning(
                 "Mic '%s' not found; using default input device %s (%s)",
                 name_substring,
@@ -125,7 +128,9 @@ class WakeWordDetector:
         is_muted: Optional[Callable[[], bool]] = None,
     ):
         if not OPENWAKEWORD_AVAILABLE:
-            raise RuntimeError("openwakeword not installed. Run: pip install openwakeword")
+            raise RuntimeError(
+                "openwakeword not installed. Run: pip install openwakeword"
+            )
 
         self.threshold = threshold
         self.sample_rate = sample_rate
@@ -274,6 +279,7 @@ class WakeWordDetector:
 
     def _listen_with_sounddevice(self) -> bool:
         """Listen for wake words using sounddevice RawInputStream."""
+
         def audio_callback(indata, frames, time_info, status):
             if status:
                 log.debug("Wake-word audio status: %s", status)

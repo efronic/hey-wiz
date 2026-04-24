@@ -190,7 +190,9 @@ async def _call_openclaw(prompt: str) -> str:
         log.error(
             "OPENCLAW_TOKEN is not configured. Set it in .env from the OpenClaw dashboard Control UI token."
         )
-        return "OpenClaw token is not configured. Please set OPENCLAW_TOKEN in your .env."
+        return (
+            "OpenClaw token is not configured. Please set OPENCLAW_TOKEN in your .env."
+        )
 
     log.info("Calling OpenClaw gateway (session=%s)…", config.OPENCLAW_SESSION_ID)
     try:
@@ -198,7 +200,10 @@ async def _call_openclaw(prompt: str) -> str:
     except Exception as exc:
         error_text = str(exc)
         log.error("Gateway connect failed: %s", error_text)
-        if "token mismatch" in error_text.lower() or "auth failed" in error_text.lower():
+        if (
+            "token mismatch" in error_text.lower()
+            or "auth failed" in error_text.lower()
+        ):
             return "OpenClaw authentication failed. Please update OPENCLAW_TOKEN in your .env from Control UI settings."
         return "Sorry, I couldn't connect to OpenClaw."
 

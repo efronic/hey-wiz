@@ -9,7 +9,6 @@ import tempfile
 import wave
 from pathlib import Path
 
-
 log = logging.getLogger(__name__)
 
 
@@ -73,8 +72,9 @@ class WhisperSTT:
                 return str(candidate)
 
         raise FileNotFoundError(
-            "Model not found at {} and no fallback model was found in local models/ or whisper.cpp/models/."
-            .format(configured_path)
+            "Model not found at {} and no fallback model was found in local models/ or whisper.cpp/models/.".format(
+                configured_path
+            )
         )
 
     def transcribe(self, audio_path: str) -> str:

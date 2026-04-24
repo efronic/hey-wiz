@@ -6,10 +6,10 @@ import threading
 
 import numpy as np
 import sounddevice as sd
-
-import config
 from audio.stt_engine import WhisperSTT
 from senses.wake_word_detector import WakeWordDetector
+
+import config
 
 log = logging.getLogger(__name__)
 
@@ -218,7 +218,9 @@ def _record_command_with_arecord(
 ) -> np.ndarray:
     """Record command audio using ALSA arecord when sounddevice input is unavailable."""
     if not config.MIC_ALSA_DEVICE:
-        log.error("No microphone backend available (sounddevice + ALSA fallback missing)")
+        log.error(
+            "No microphone backend available (sounddevice + ALSA fallback missing)"
+        )
         return np.array([], dtype=np.int16)
 
     cmd = [
@@ -309,7 +311,9 @@ def transcribe(audio: np.ndarray) -> str:
 
     log.info("Transcribing %d samples with whisper-cpp…", len(audio))
     try:
-        text = _stt_engine.transcribe_audio_array(audio, sample_rate=config.WHISPER_SAMPLE_RATE)
+        text = _stt_engine.transcribe_audio_array(
+            audio, sample_rate=config.WHISPER_SAMPLE_RATE
+        )
         log.info("Transcription: %s", text)
         return text
     except Exception as exc:

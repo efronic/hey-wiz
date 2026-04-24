@@ -113,8 +113,9 @@ def _resolve_piper_model(configured_path: str) -> str:
             return str(candidate)
 
     raise FileNotFoundError(
-        "Piper voice model not found at {} and no fallback model was found in models/."
-        .format(configured_path)
+        "Piper voice model not found at {} and no fallback model was found in models/.".format(
+            configured_path
+        )
     )
 
 

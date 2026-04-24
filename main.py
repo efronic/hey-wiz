@@ -7,9 +7,10 @@ import asyncio
 import logging
 import signal
 
+import screen_output
+
 import audio_pipeline
 import brain_bridge
-import screen_output
 import voice_output
 
 logging.basicConfig(

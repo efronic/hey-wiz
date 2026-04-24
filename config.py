@@ -23,6 +23,7 @@ def _env_bool(name: str, default: bool) -> bool:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
+
 # ---------------------------------------------------------------------------
 # Wake Word
 # ---------------------------------------------------------------------------
@@ -32,9 +33,7 @@ WAKE_WORD_MODEL_PATH = os.getenv(
 )
 WAKE_WORD_THRESHOLD = float(os.getenv("WAKE_WORD_THRESHOLD", "0.5"))
 WAKE_SAMPLE_RATE = int(os.getenv("WAKE_SAMPLE_RATE", "16000"))
-WAKE_WORD_ALLOW_BUNDLED_FALLBACK = _env_bool(
-    "WAKE_WORD_ALLOW_BUNDLED_FALLBACK", True
-)
+WAKE_WORD_ALLOW_BUNDLED_FALLBACK = _env_bool("WAKE_WORD_ALLOW_BUNDLED_FALLBACK", True)
 WAKE_WORD_BUNDLED_MODEL_NAME = os.getenv("WAKE_WORD_BUNDLED_MODEL_NAME", "hey_jarvis")
 
 # ---------------------------------------------------------------------------
@@ -146,9 +145,7 @@ DISPLAY_HEIGHT = int(os.getenv("DISPLAY_HEIGHT", "480"))
 UI_FPS = int(os.getenv("UI_FPS", "30"))
 UI_BACKEND = os.getenv("UI_BACKEND", "wayland")
 UI_FBCON_FALLBACK = _env_bool("UI_FBCON_FALLBACK", True)
-UI_ASSETS_PATH = Path(
-    os.getenv("UI_ASSETS_PATH", str(PROJECT_DIR / "assets" / "face"))
-)
+UI_ASSETS_PATH = Path(os.getenv("UI_ASSETS_PATH", str(PROJECT_DIR / "assets" / "face")))
 
 # ---------------------------------------------------------------------------
 # Filler phrases (pre-generated WAVs played while processing)
