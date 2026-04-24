@@ -1,220 +1,233 @@
-# wiz-voice — Product Requirements Document
+# wiz-voice Product Requirements Document
 
 ## 1. Overview
 
-**wiz-voice** is a headless, always-on AI voice assistant running on a
-Raspberry Pi 5. It listens for a wake word, records a voice command,
-transcribes it locally, and routes it to a local OpenClaw LLM instance. When
-the user's intent involves vision, the system captures an image with a Pi
-Camera Module 3, identifies the subject via a cloud Vision API, and delegates
-data retrieval (e.g. IMDB ratings) to OpenClaw's agent-browser skill. The
-final answer is spoken back through local Text-to-Speech.
+wiz-voice is an always-on Raspberry Pi assistant that now uses:
+- pibot-style wake-word detection logic
+- pibot-style Whisper.cpp STT wrapper logic
+- a touchscreen UI state layer for a 5-inch display
+- existing OpenClaw routing and response flow (unchanged)
 
-## 2. Architecture
+This document reflects the migration implemented in branch feat/new-voice-detection in worktree /home/efron/projects/wiz-voice-2.
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  Raspberry Pi 5  (headless)                                  │
-│                                                              │
-│  ┌────────────┐   wake    ┌────────────┐   audio             │
-│  │ USB Mic    │──────────▶│ audio_     │──────────┐          │
-│  │ (48 kHz)   │           │ pipeline   │          │          │
-│  └────────────┘           │            │◀─ oww ── │          │
-│                           │  record +  │          │          │
-│                           │  whisper   │   text   │          │
-│                           └─────┬──────┘          │          │
-│                                 │                 │          │
-│                                 ▼                 │          │
-│                           ┌─────────────┐         │          │
-│                           │ brain_      │         │          │
-│                           │ bridge      │         │          │
-│                           │             │         │          │
-│            ┌──────────────│ intent ──▶  │         │          │
-│            │  vision?     │ vision API  │         │          │
-│            ▼              │ openclaw    │         │          │
-│  ┌────────────┐           └─────┬───────┘         │          │
-│  │ Pi Camera  │                 │                 │          │
-│  │ Module 3   │                 │ response        │          │
-│  │ (picamera2)│                 ▼                 │          │
-│  └────────────┘           ┌─────────────┐         │          │
-│                           │ voice_      │         │          │
-│                           │ output      │         │          │
-│                           │ (piper+aplay│────────▶│          │
-│                           └─────────────┘  USB    │          │
-│                                            Spkr   │          │
-└──────────────────────────────────────────────────────────────┘
-                                 │
-                    ┌────────────┴────────────┐
-                    │  LAN / localhost:18789  │
-                    │  OpenClaw (OpenAI API)  │
-                    │  agent-browser skill    │
-                    └─────────────────────────┘
+## 2. Goals
+
+1. Replace prior wake-word internals with pibot_local_agent wake detector behavior.
+2. Replace prior transcription internals with pibot_local_agent STT wrapper behavior.
+3. Add visual state feedback on the connected 5-inch touch display.
+4. Keep current OpenClaw gateway and command-tag brain behavior intact.
+
+## 3. Non-Goals
+
+1. No migration to pibot Ollama router/toolchain.
+2. No change to the current OpenClaw WebSocket response model.
+3. No requirement for cloud-only STT or wake services.
+
+## 4. System Architecture
+
+```text
+Microphone (48kHz)
+  -> WakeWordDetector (threaded, queue-based, custom ONNX model)
+  -> wake event
+  -> audio_pipeline.record_command()
+  -> WhisperSTT.transcribe_audio_array() (16kHz)
+  -> brain_bridge.process() (OpenClaw flow)
+  -> voice_output.speak()
+  -> Speaker
+
+Touchscreen UI (5-inch)
+  <- screen_output.show_state()
+  <- main loop + error handling
 ```
 
-## 3. Hardware BOM
+### 4.1 Runtime State Machine
 
-| Component                  | Notes                                    |
-|----------------------------|------------------------------------------|
-| Raspberry Pi 5 (4 GB+)    | Headless Raspberry Pi OS (Bookworm 64-bit) |
-| USB Microphone             | 48 kHz capture, ALSA-compatible          |
-| USB Speaker                | ALSA playback                            |
-| Pi Camera Module 3         | libcamera / picamera2 (NOT legacy)       |
-| MicroSD 32 GB+             | OS + models (~500 MB)                    |
-| Power Supply 27 W USB-C   | Official Pi 5 PSU recommended            |
+- IDLE: waiting for wake word
+- LISTENING: recording user command
+- THINKING: transcribing and processing
+- SPEAKING: TTS playback
+- ERROR: temporary failure state
 
-## 4. Software Dependencies
+## 5. Module Design
 
-| Library / Tool      | Purpose                          | Install Method    |
-|----------------------|----------------------------------|-------------------|
-| openwakeword         | Offline wake-word detection      | pip               |
-| sounddevice          | Audio I/O via PortAudio          | pip               |
-| numpy                | Audio buffer manipulation        | pip               |
-| whispercpp           | Local STT (ONNX, base.en)       | pip               |
-| picamera2            | Pi Camera Module 3 capture       | apt + pip         |
-| httpx                | Async HTTP client                | pip               |
-| python-dotenv        | .env file loading                | pip               |
-| piper-tts            | Local offline TTS                | pip / binary      |
-| libcamera            | Camera backend for picamera2     | apt               |
-| alsa-utils           | aplay / arecord                  | apt               |
+### 5.1 Wake-Word Module
 
-### Models
+File: [senses/wake_word_detector.py](senses/wake_word_detector.py)
 
-| Model                          | Size   | Location                   |
-|--------------------------------|--------|----------------------------|
-| ggml-base.en.bin (Whisper)     | ~148 MB| `models/`                  |
-| en_US-lessac-medium.onnx (Piper)| ~64 MB| `models/`                  |
-| hey_jarvis (openwakeword)      | bundled| openwakeword package       |
+Requirements:
+1. Use openWakeWord model API.
+2. Require custom model path (no bundled fallback mode).
+3. Run in background thread.
+4. Support pause/resume to free mic during capture and speech.
+5. Use adaptive gain normalization and mic queue buffering.
 
-## 5. Module Specifications
+### 5.2 STT Module
 
-### 5.1 `config.py`
+File: [audio/stt_engine.py](audio/stt_engine.py)
 
-Central configuration loaded from `.env` + environment variables.
+Requirements:
+1. Wrap whisper-cpp execution.
+2. Validate binary and model paths at startup.
+3. Support file-based transcription and numpy-array transcription.
+4. Remove known artifacts such as [BLANK_AUDIO] from output.
 
-| Variable               | Default                                          |
-|------------------------|--------------------------------------------------|
-| WAKE_WORD_MODEL        | `hey_jarvis`                                     |
-| WAKE_WORD_THRESHOLD    | `0.5`                                            |
-| SAMPLE_RATE            | `48000`                                          |
-| WHISPER_SAMPLE_RATE    | `16000`                                          |
-| SILENCE_THRESHOLD      | `500` (RMS)                                      |
-| SILENCE_DURATION       | `1.5` s                                          |
-| MAX_RECORD_SECONDS     | `30`                                             |
-| WHISPER_MODEL_PATH     | `models/ggml-base.en.bin`                        |
-| VISION_PROVIDER        | `anthropic`                                      |
-| ANTHROPIC_API_KEY      | (from .env)                                      |
-| OPENAI_API_KEY         | (from .env)                                      |
-| OPENCLAW_URL           | `http://127.0.0.1:18789/v1/chat/completions`     |
-| OPENCLAW_TOKEN         | (from .env)                                      |
-| OPENCLAW_MODEL         | `openai-codex/gpt-5.4`                           |
-| PIPER_MODEL_PATH       | `models/en_US-lessac-medium.onnx`                |
+### 5.3 Pipeline Integration
 
-### 5.2 `audio_pipeline.py`
+File: [audio_pipeline.py](audio_pipeline.py)
 
-| Function            | Description                                        |
-|---------------------|----------------------------------------------------|
-| `init()`            | Pre-load openwakeword model                        |
-| `start_listening()` | Open mic stream, begin wake-word detection (bg)    |
-| `wait_for_wake()`   | Block until wake word fires                        |
-| `record_command()`  | Record until 1.5 s silence; return int16 array     |
-| `transcribe(audio)` | Downsample 48→16 kHz, run Whisper, return text     |
+Requirements:
+1. Keep existing callable surface for main loop:
+   - init()
+   - start_listening()
+   - wait_for_wake()
+   - record_command()
+   - transcribe()
+   - resume_listening()
+   - shutdown()
+2. Delegate wake detection to WakeWordDetector.
+3. Delegate STT to WhisperSTT.
+4. Maintain mic mute/unmute interoperability with TTS.
 
-### 5.3 `vision_capture.py`
+### 5.4 Touchscreen UI Module
 
-| Function          | Description                                          |
-|-------------------|------------------------------------------------------|
-| `capture_image()` | Init Picamera2, autofocus, capture JPEG, release cam |
+Files:
+- [ui/ui_manager.py](ui/ui_manager.py)
+- [screen_output.py](screen_output.py)
 
-Camera constraints:
-- Must use `picamera2` + `libcamera` (NOT legacy `cv2` or `raspistill`)
-- Must enable `AfModeEnum.Continuous` before capture
-- Must release camera in `finally` block
+Requirements:
+1. Provide UIState enum: IDLE, LISTENING, THINKING, SPEAKING, ERROR.
+2. Render full-screen at 800x480 by default.
+3. Use Wayland driver first.
+4. Allow fbcon fallback when configured.
+5. Use PNG face assets when present, procedural fallback otherwise.
+6. Run safely in background thread and degrade to headless if init fails.
 
-### 5.4 `brain_bridge.py`
+### 5.5 Main Orchestration
 
-| Function                    | Description                                  |
-|-----------------------------|----------------------------------------------|
-| `_detect_vision_intent(t)`  | Keyword match → bool                         |
-| `_call_vision_api(path)`    | Base64 image → Anthropic/OpenAI → title      |
-| `_call_openclaw(prompt)`    | POST to OpenClaw with Bearer auth            |
-| `process(transcription)`    | Orchestrate intent → vision → OpenClaw → text|
+File: [main.py](main.py)
 
-OpenClaw integration:
-- Endpoint: `http://127.0.0.1:18789/v1/chat/completions`
-- Auth: `Authorization: Bearer {OPENCLAW_TOKEN}`
-- Model: `openai-codex/gpt-5.4`
-- No web-scraping code — delegates to OpenClaw's agent-browser skill
+Requirements:
+1. Keep existing OpenClaw request/response behavior.
+2. Add UI state transitions around each stage.
+3. Ensure clean shutdown of wake detector and UI thread.
+4. Keep signal handling and loop resilience.
 
-### 5.5 `voice_output.py`
+## 6. Configuration
 
-| Function      | Description                                          |
-|---------------|------------------------------------------------------|
-| `speak(text)` | Sanitize → Piper TTS → aplay pipeline (blocks)      |
+File: [config.py](config.py)
 
-### 5.6 `main.py`
+### 6.1 Required Configuration
 
-Orchestrator loop:
-1. Load `.env`, init models
-2. Start wake-word listener
-3. Wait for wake → record → transcribe → process → speak
-4. Repeat; handle SIGINT/SIGTERM gracefully
+- OPENCLAW_TOKEN is required.
+- WAKE_WORD_MODEL_PATH is recommended for custom wake behavior.
+- When WAKE_WORD_MODEL_PATH is invalid or missing, bundled fallback can be used.
 
-## 6. Data Flow
+### 6.2 Primary Runtime Configuration
 
-```
-[USB Mic 48kHz] → sounddevice → openwakeword (wake detection)
-                                      │
-                                wake event
-                                      │
-                               record audio
-                                      │
-                          downsample 48→16 kHz
-                                      │
-                            Whisper STT (local)
-                                      │
-                              transcribed text
-                                      │
-                        ┌─────────────┴──────────────┐
-                   vision intent?                 no vision
-                        │                             │
-                  capture_image()                      │
-                        │                             │
-                   Vision API                         │
-                  (Anthropic/OpenAI)                   │
-                        │                             │
-                   extract title                      │
-                        │                             │
-                  construct prompt                    │
-                  (agent-browser)                     │
-                        │                             │
-                        └─────────────┬──────────────┘
-                                      │
-                         OpenClaw POST (Bearer auth)
-                         model: openai-codex/gpt-5.4
-                                      │
-                              response text
-                                      │
-                          Piper TTS → aplay
-                                      │
-                              [USB Speaker]
-```
+Wake/STT:
+- WAKE_WORD_MODEL_PATH
+- WAKE_WORD_THRESHOLD
+- WAKE_SAMPLE_RATE
+- WAKE_WORD_ALLOW_BUNDLED_FALLBACK
+- WAKE_WORD_BUNDLED_MODEL_NAME
+- SAMPLE_RATE
+- WHISPER_BINARY_PATH
+- WHISPER_MODEL_PATH
+- WHISPER_THREADS
+- WHISPER_BEAM_SIZE
 
-## 7. Known Limitations (v1)
+Display/UI:
+- ENABLE_UI
+- DISPLAY_WIDTH
+- DISPLAY_HEIGHT
+- UI_FPS
+- UI_BACKEND
+- UI_FBCON_FALLBACK
+- UI_ASSETS_PATH
 
-- **Wake word**: Using pre-trained `hey_jarvis`; custom `hey_wiz` requires
-  openwakeword training pipeline (deferred).
-- **Single-turn only**: No conversation memory between queries.
-- **No streaming TTS**: Full response is synthesised before playback begins.
-- **Downsampling**: Simple numpy decimation (factor 3). May introduce aliasing
-  in edge cases; swap to `scipy.signal.resample` if quality degrades.
-- **Camera latency**: ~1 s autofocus delay per capture.
-- **Vision scope**: Cloud API call required (not offline).
+OpenClaw/Vision/TTS settings remain in existing config scope.
 
-## 8. Future Roadmap
+## 7. Setup and Deployment
 
-- [ ] Train custom `hey_wiz` wake word via openwakeword training pipeline
-- [ ] Streaming TTS for lower perceived latency
-- [ ] Multi-turn conversation context
-- [ ] On-device vision model (e.g. MobileNet) for offline fallback
-- [ ] LED/GPIO feedback for listening/processing/speaking states
-- [ ] Web dashboard for configuration and logs
+### 7.1 Installer
+
+File: [setup_pi.sh](setup_pi.sh)
+
+Requirements:
+1. Install camera/audio dependencies.
+2. Install SDL runtime dependencies for pygame UI.
+3. Build/install whisper-cpp.
+4. Install Python requirements.
+5. Create wake_word model directory and face assets directory.
+6. Warn user to set WAKE_WORD_MODEL_PATH in .env.
+
+### 7.2 Environment Template
+
+File: [.env.example](.env.example)
+
+Requirements:
+1. Include wake model path variable.
+2. Include bundled wake fallback controls.
+3. Include UI variables for touchscreen behavior.
+4. Keep OpenClaw and Vision templates intact.
+
+## 8. Documentation
+
+### 8.1 Repository Documentation
+
+File: [README.md](README.md)
+
+Requirements:
+1. Describe migrated architecture and unchanged OpenClaw boundary.
+2. Document setup and run instructions.
+3. Document wake model custom path and bundled fallback behavior.
+4. Document touchscreen UI behavior and backend options.
+5. Record worktree path and branch used for migration.
+
+### 8.2 Product Document
+
+File: [PRD.md](PRD.md)
+
+Requirement:
+- This PRD must remain aligned with implemented behavior in feat/new-voice-detection.
+
+## 9. Acceptance Criteria
+
+1. App starts with custom wake model when available, or bundled fallback when enabled.
+2. Wake detection triggers recording reliably.
+3. STT returns text from recorded speech through Whisper.cpp wrapper.
+4. OpenClaw processing remains functional.
+5. UI transitions correctly through IDLE, LISTENING, THINKING, SPEAKING.
+6. Error path sets ERROR state and recovers to IDLE.
+7. Clean shutdown stops wake detector and UI thread.
+
+## 10. Verification Checklist
+
+1. Static checks report no Python errors in workspace.
+2. Manual flow test:
+   - wake word
+   - record
+   - transcribe
+   - OpenClaw response
+   - spoken output
+3. Touchscreen UI visible during run and reflects lifecycle states.
+4. If display init fails, assistant still runs headless.
+5. If wake model path is invalid and fallback is disabled, startup fails with clear message.
+
+## 11. Risks and Mitigations
+
+1. Missing custom wake model file:
+   - Mitigation: fail fast at startup with explicit path error.
+2. Wayland display init failure:
+   - Mitigation: optional fbcon fallback and headless-safe UI facade.
+3. Mic/speaker hardware name mismatch:
+   - Mitigation: device name config remains tunable via environment.
+4. Thread shutdown edge cases:
+   - Mitigation: explicit shutdown hooks in main loop.
+
+## 12. Future Enhancements
+
+1. Touch interaction controls (tap-to-mute, tap-to-retry).
+2. Live amplitude visualization from mic and TTS signals.
+3. Optional conversational memory layer.
+4. Additional face assets tuned for state transitions.

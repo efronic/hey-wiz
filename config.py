@@ -16,11 +16,26 @@ load_dotenv()
 PROJECT_DIR = Path(__file__).resolve().parent
 MODELS_DIR = PROJECT_DIR / "models"
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
 # ---------------------------------------------------------------------------
 # Wake Word
 # ---------------------------------------------------------------------------
-WAKE_WORD_MODEL = os.getenv("WAKE_WORD_MODEL", "hey_jarvis")
+WAKE_WORD_MODEL_PATH = os.getenv(
+    "WAKE_WORD_MODEL_PATH",
+    str(MODELS_DIR / "wake_word" / "hey_wiz.onnx"),
+)
 WAKE_WORD_THRESHOLD = float(os.getenv("WAKE_WORD_THRESHOLD", "0.5"))
+WAKE_SAMPLE_RATE = int(os.getenv("WAKE_SAMPLE_RATE", "16000"))
+WAKE_WORD_ALLOW_BUNDLED_FALLBACK = _env_bool(
+    "WAKE_WORD_ALLOW_BUNDLED_FALLBACK", True
+)
+WAKE_WORD_BUNDLED_MODEL_NAME = os.getenv("WAKE_WORD_BUNDLED_MODEL_NAME", "hey_jarvis")
 
 # ---------------------------------------------------------------------------
 # Audio
@@ -30,6 +45,7 @@ WHISPER_SAMPLE_RATE = 16000  # Whisper expects 16 kHz
 DOWNSAMPLE_FACTOR = SAMPLE_RATE // WHISPER_SAMPLE_RATE  # 3
 CHUNK_SAMPLES = 3840  # 80ms at 48 kHz → 1280 at 16 kHz (matches pibot)
 MIC_DEVICE = None  # Resolved at runtime; override with int index if needed
+MIC_ALSA_DEVICE = None  # Resolved at runtime when arecord fallback is needed
 
 # Device names for lookup (survives USB re-enumeration across reboots)
 MIC_NAME = os.getenv("MIC_NAME", "USB PnP Sound Device")
@@ -50,9 +66,10 @@ GAIN_TARGET_PEAK = float(os.getenv("GAIN_TARGET_PEAK", "0.9"))
 WHISPER_BINARY_PATH = os.getenv("WHISPER_BINARY_PATH", "/usr/local/bin/whisper-cpp")
 WHISPER_THREADS = int(os.getenv("WHISPER_THREADS", "4"))
 WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
+WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")
 WHISPER_MODEL_PATH = os.getenv(
     "WHISPER_MODEL_PATH",
-    str(MODELS_DIR / "ggml-base.en-q5_0.bin"),
+    str(MODELS_DIR / "ggml-small.en-q8_0.bin"),
 )
 
 # ---------------------------------------------------------------------------
@@ -116,9 +133,22 @@ OPENCLAW_TIMEOUT = int(os.getenv("OPENCLAW_TIMEOUT", "60"))
 # ---------------------------------------------------------------------------
 PIPER_MODEL_PATH = os.getenv(
     "PIPER_MODEL_PATH",
-    str(MODELS_DIR / "en_US-lessac-medium.onnx"),
+    str(MODELS_DIR / "en_US-lessac-high.onnx"),
 )
 MAX_TTS_CHARS = int(os.getenv("MAX_TTS_CHARS", "500"))
+
+# ---------------------------------------------------------------------------
+# UI / Touchscreen display
+# ---------------------------------------------------------------------------
+ENABLE_UI = _env_bool("ENABLE_UI", True)
+DISPLAY_WIDTH = int(os.getenv("DISPLAY_WIDTH", "800"))
+DISPLAY_HEIGHT = int(os.getenv("DISPLAY_HEIGHT", "480"))
+UI_FPS = int(os.getenv("UI_FPS", "30"))
+UI_BACKEND = os.getenv("UI_BACKEND", "wayland")
+UI_FBCON_FALLBACK = _env_bool("UI_FBCON_FALLBACK", True)
+UI_ASSETS_PATH = Path(
+    os.getenv("UI_ASSETS_PATH", str(PROJECT_DIR / "assets" / "face"))
+)
 
 # ---------------------------------------------------------------------------
 # Filler phrases (pre-generated WAVs played while processing)

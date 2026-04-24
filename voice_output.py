@@ -61,9 +61,13 @@ def init() -> None:
 
     from piper import PiperVoice
 
-    model_path = config.PIPER_MODEL_PATH
-    if not Path(model_path).exists():
-        raise FileNotFoundError(f"Piper voice model not found at {model_path}")
+    model_path = _resolve_piper_model(config.PIPER_MODEL_PATH)
+    if model_path != config.PIPER_MODEL_PATH:
+        log.warning(
+            "Piper model not found at %s; using %s",
+            config.PIPER_MODEL_PATH,
+            model_path,
+        )
 
     log.info("Loading Piper voice model: %s", model_path)
     _voice = PiperVoice.load(model_path)
@@ -90,6 +94,28 @@ def _set_volume(volume_pct: int) -> None:
         log.info("Speaker volume set to %d%% (card %s)", volume_pct, card_num)
     except Exception as exc:
         log.warning("Could not set speaker volume: %s", exc)
+
+
+def _resolve_piper_model(configured_path: str) -> str:
+    """Resolve a usable Piper model path from configured and common local files."""
+    configured = Path(configured_path) if configured_path else None
+    if configured and configured.exists():
+        return str(configured)
+
+    project_root = Path(__file__).resolve().parent
+    candidates = [
+        project_root / "models" / "en_US-lessac-high.onnx",
+        project_root / "models" / "en_US-lessac-medium.onnx",
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    raise FileNotFoundError(
+        "Piper voice model not found at {} and no fallback model was found in models/."
+        .format(configured_path)
+    )
 
 
 def _load_fillers() -> None:

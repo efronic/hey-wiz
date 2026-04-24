@@ -17,6 +17,13 @@ import config
 log = logging.getLogger(__name__)
 
 VISION_API_TIMEOUT = 30.0
+PLACEHOLDER_GATEWAY_TOKEN = "your-openclaw-gateway-token"
+
+
+def _has_valid_gateway_token() -> bool:
+    """Return True when OPENCLAW_TOKEN looks configured (not empty/placeholder)."""
+    token = (config.OPENCLAW_TOKEN or "").strip()
+    return bool(token and token != PLACEHOLDER_GATEWAY_TOKEN)
 
 
 # ---------------------------------------------------------------------------
@@ -179,11 +186,20 @@ async def _gw_connect() -> websockets.WebSocketClientProtocol:
 
 async def _call_openclaw(prompt: str) -> str:
     """Send a message via the OpenClaw gateway WebSocket and return the reply."""
+    if not _has_valid_gateway_token():
+        log.error(
+            "OPENCLAW_TOKEN is not configured. Set it in .env from the OpenClaw dashboard Control UI token."
+        )
+        return "OpenClaw token is not configured. Please set OPENCLAW_TOKEN in your .env."
+
     log.info("Calling OpenClaw gateway (session=%s)…", config.OPENCLAW_SESSION_ID)
     try:
         ws = await _gw_connect()
     except Exception as exc:
-        log.error("Gateway connect failed: %s", exc)
+        error_text = str(exc)
+        log.error("Gateway connect failed: %s", error_text)
+        if "token mismatch" in error_text.lower() or "auth failed" in error_text.lower():
+            return "OpenClaw authentication failed. Please update OPENCLAW_TOKEN in your .env from Control UI settings."
         return "Sorry, I couldn't connect to OpenClaw."
 
     try:

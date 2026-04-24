@@ -15,6 +15,11 @@ sudo apt-get install -y \
     python3-picamera2 \
     alsa-utils \
     portaudio19-dev \
+    libsdl2-2.0-0 \
+    libsdl2-image-2.0-0 \
+    libsdl2-mixer-2.0-0 \
+    libsdl2-ttf-2.0-0 \
+    libfreetype6 \
     python3-venv \
     wget \
     build-essential \
@@ -23,6 +28,8 @@ sudo apt-get install -y \
 
 # ── Models directory ──────────────────────────────────────────
 mkdir -p "$MODELS_DIR"
+mkdir -p "$MODELS_DIR/wake_word"
+mkdir -p "$ASSETS_DIR/face"
 
 # ── Whisper.cpp ───────────────────────────────────────────────
 WHISPER_DIR="$SCRIPT_DIR/whisper.cpp"
@@ -119,3 +126,4 @@ echo ""
 echo "=== Setup complete ==="
 echo "Activate with: source $VENV_DIR/bin/activate"
 echo "Copy .env.example to .env and fill in your API keys."
+echo "Set WAKE_WORD_MODEL_PATH in .env to your custom ONNX wake model."
