@@ -1,214 +1,398 @@
-"""Audio pipeline: wake word detection, voice recording, and Whisper STT."""
+"""Audio pipeline: wake word detection, voice recording, and Whisper STT.
+
+Wake word  — openwakeword (queue-based, threaded listener)
+STT        — whisper.cpp  (compiled C++ binary via subprocess)
+Audio      — sounddevice  (adaptive gain, mic muting, device-by-name lookup)
+"""
 
 import logging
+import os
+import subprocess
+import tempfile
 import threading
 import time
+import wave
+from pathlib import Path
+from queue import Empty, Queue
 
 import numpy as np
 import openwakeword
 import sounddevice as sd
 from openwakeword.model import Model as WakeWordModel
+from scipy.signal import decimate
 
 import config
 
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Device helpers (survive USB re-enumeration across reboots)
+# ---------------------------------------------------------------------------
+
+
+def _find_device_by_name(name_substring: str, kind: str) -> int | None:
+    """Find a sounddevice device index by name substring.
+
+    Returns the index, or None if *name_substring* is empty / not found
+    (falls back to system default).
+    """
+    if not name_substring:
+        return None
+    devices = sd.query_devices()
+    channel_key = "max_input_channels" if kind == "input" else "max_output_channels"
+    for i, d in enumerate(devices):
+        if name_substring.lower() in d["name"].lower() and d[channel_key] > 0:
+            return i
+    log.warning(
+        "Audio device matching '%s' (%s) not found — using system default",
+        name_substring,
+        kind,
+    )
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Module-level state (initialised by init())
 # ---------------------------------------------------------------------------
 _oww_model: WakeWordModel | None = None
 _wake_event = threading.Event()
-_listening = False
-_mic_stream = None
+_resume_event = threading.Event()
+_running = False
+_paused = False
+_listen_thread: threading.Thread | None = None
+_audio_queue: Queue = Queue()
+
+# Adaptive gain state
+_gain = 4.0
+
+# Mic muting (prevents self-triggering during TTS playback)
+_muted = False
+_mute_lock = threading.Lock()
+
+
+def mute() -> None:
+    """Mute microphone input (call before TTS playback)."""
+    global _muted
+    with _mute_lock:
+        _muted = True
+
+
+def unmute() -> None:
+    """Unmute microphone input (call after TTS playback)."""
+    global _muted
+    with _mute_lock:
+        _muted = False
+
+
+# ---------------------------------------------------------------------------
+# Adaptive gain normalisation for weak USB mics
+# ---------------------------------------------------------------------------
+
+
+def _normalize(audio: np.ndarray) -> np.ndarray:
+    """Apply adaptive, smoothed gain normalisation."""
+    global _gain
+    peak = np.max(np.abs(audio))
+    if peak < 50:
+        return audio.astype(np.int16)
+    target = config.GAIN_TARGET_PEAK * 32767
+    desired_gain = min(target / peak, 15.0)
+    # Smooth: 30 % new + 70 % old — avoids sudden jumps
+    _gain = 0.3 * desired_gain + 0.7 * _gain
+    _gain = min(_gain, 15.0)
+    gained = np.clip(audio.astype(np.float64) * _gain, -32768, 32767)
+    return gained.astype(np.int16)
+
+
+# ---------------------------------------------------------------------------
+# Initialisation
+# ---------------------------------------------------------------------------
 
 
 def init() -> None:
-    """Pre-load the openwakeword model (call once at startup)."""
+    """Pre-load the openwakeword model and resolve mic device (call once)."""
     global _oww_model
     log.info("Loading wake-word model: %s", config.WAKE_WORD_MODEL)
 
-    # Get the absolute file paths to all bundled pre-trained ONNX models
     model_paths = openwakeword.get_pretrained_model_paths()
-
-    # Find the specific path that contains "hey_jarvis"
     target_path = next((p for p in model_paths if config.WAKE_WORD_MODEL in p), None)
-
     if not target_path:
         raise ValueError(
             f"Could not find pre-trained model for {config.WAKE_WORD_MODEL}"
         )
-
-    # Initialize the model using the exact absolute file path
     _oww_model = WakeWordModel(wakeword_model_paths=[target_path])
 
+    # Resolve mic device index by name so it survives USB re-enumeration
+    resolved = _find_device_by_name(config.MIC_NAME, "input")
+    if resolved is not None:
+        config.MIC_DEVICE = resolved
+        log.info("Mic device resolved: index %d (%s)", resolved, config.MIC_NAME)
+
 
 # ---------------------------------------------------------------------------
-# Wake word listener (runs on a daemon thread)
+# Queue-based wake word listener (runs on a daemon thread)
 # ---------------------------------------------------------------------------
 
 
-def _audio_callback(indata: np.ndarray, frames: int, time_info, status) -> None:
-    """sounddevice callback — feed chunks to openwakeword."""
-    if status:
-        log.warning("Audio callback status: %s", status)
-    if not _listening or _oww_model is None:
-        return
+def _listen_loop() -> None:
+    """Main listening loop — reopens stream after each pause/resume cycle."""
+    global _paused
 
-    # openwakeword expects int16 mono at 16kHz!
-    chunk = indata[:: config.DOWNSAMPLE_FACTOR, 0].copy()
-    prediction = _oww_model.predict(chunk)
+    while _running:
+        _resume_event.wait()
+        if not _running:
+            break
 
-    for wake_word, score in prediction.items():
-        if score > config.WAKE_WORD_THRESHOLD:
-            log.info("Wake word detected: %s (score=%.3f)", wake_word, score)
+        # Drain stale audio from the queue
+        while not _audio_queue.empty():
+            try:
+                _audio_queue.get_nowait()
+            except Empty:
+                break
+
+        def _raw_callback(indata, frames, time_info, status):
+            if _muted or _paused:
+                return
+            _audio_queue.put(bytes(indata))
+
+        try:
+            stream = sd.RawInputStream(
+                device=config.MIC_DEVICE,
+                samplerate=config.SAMPLE_RATE,
+                channels=1,
+                dtype="int16",
+                blocksize=config.CHUNK_SAMPLES,
+                latency="high",
+                callback=_raw_callback,
+            )
+            stream.start()
+        except Exception as exc:
+            log.error("Wake word stream error: %s", exc)
+            if _running:
+                time.sleep(1.0)
+            continue
+
+        detected = False
+        while _running and not _paused:
+            try:
+                raw = _audio_queue.get(timeout=0.1)
+            except Empty:
+                continue
+
+            audio = np.frombuffer(raw, dtype=np.int16).astype(np.float64)
+            normalised = _normalize(audio)
+            # Anti-aliased downsampling (low-pass filter before decimation)
+            decimated = decimate(
+                normalised, config.DOWNSAMPLE_FACTOR, ftype="fir"
+            ).astype(np.int16)
+
+            predictions = _oww_model.predict(decimated)
+            for model_name, score in predictions.items():
+                if score >= config.WAKE_WORD_THRESHOLD:
+                    log.info("Wake word detected: %s (score=%.3f)", model_name, score)
+                    detected = True
+                    break
+            if detected:
+                break
+
+        # Close stream BEFORE signalling — frees USB mic for recording
+        stream.stop()
+        stream.close()
+
+        if detected:
+            _paused = True
+            _resume_event.clear()
             _oww_model.reset()
             _wake_event.set()
-            return
 
 
 def start_listening() -> None:
-    """Open the mic stream and begin wake-word detection."""
-    global _listening, _mic_stream
+    """Start the wake-word listener thread (safe to call multiple times)."""
+    global _running, _paused, _listen_thread
     if _oww_model is None:
         raise RuntimeError("Call init() before start_listening()")
 
-    # 1. Reset the logic state
-    _listening = True
-    _wake_event.clear()  # <--- YOUR EXCELLENT CATCH: Reset the "switch"
+    _wake_event.clear()
+    _paused = False
+    _resume_event.set()
 
-    # 2. If a stream is already hanging around, kill it properly first
-    if _mic_stream is not None:
-        try:
-            _mic_stream.stop()
-            _mic_stream.close()
-        except:
-            pass
-        _mic_stream = None
+    if _listen_thread is None or not _listen_thread.is_alive():
+        _running = True
+        _listen_thread = threading.Thread(target=_listen_loop, daemon=True)
+        _listen_thread.start()
 
-    # 3. Open the fresh hardware cÏonnection
-    _mic_stream = sd.InputStream(
-        device=config.MIC_DEVICE,
-        samplerate=config.SAMPLE_RATE,
-        channels=1,
-        dtype="int16",
-        blocksize=config.CHUNK_SAMPLES,
-        latency=0.5,
-        callback=_audio_callback,
-    )
-    _mic_stream.start()
     log.info("Wake-word listener active (model=%s)", config.WAKE_WORD_MODEL)
+
+
+def resume_listening() -> None:
+    """Resume wake-word detection after recording (re-opens mic stream)."""
+    global _paused
+    # Drain stale audio
+    while not _audio_queue.empty():
+        try:
+            _audio_queue.get_nowait()
+        except Empty:
+            break
+    _paused = False
+    _resume_event.set()
+    log.info("Wake-word listener resumed")
 
 
 def wait_for_wake() -> None:
     """Block until the wake word is detected."""
     import sys
-    # Loop in 100ms increments so we can catch the shutdown signal from main.py
-    while not getattr(sys.modules['__main__'], '_shutdown', False):
+
+    while not getattr(sys.modules["__main__"], "_shutdown", False):
         if _wake_event.wait(timeout=0.1):
             _wake_event.clear()
             return
 
 
 # ---------------------------------------------------------------------------
-# Voice command recording
+# Voice command recording (with gain normalisation)
 # ---------------------------------------------------------------------------
 
 
 def record_command() -> np.ndarray:
-    """Record audio until silence is detected. Returns int16 numpy array."""
-    global _mic_stream
-    
-    # 1. Stop the background wake-word listener so the mic is free
-    if _mic_stream is not None:
-        _mic_stream.stop()
-        _mic_stream.close()
-        _mic_stream = None
-
+    """Record audio until silence is detected.  Returns 16 kHz int16 numpy array."""
     log.info("Recording command…")
-    frames: list[np.ndarray] = []
-    silence_start: float | None = None
-    record_start = time.monotonic()
-    max_end = record_start + config.MAX_RECORD_SECONDS
-    grace_end = record_start + config.MIN_RECORD_SECONDS
+    audio_buffer: list[np.ndarray] = []
+    silence_samples = 0
+    blocksize = 4096
+    silence_samples_needed = int(
+        config.SILENCE_DURATION * config.SAMPLE_RATE / blocksize
+    )
+    max_chunks = int(config.MAX_RECORD_SECONDS * config.SAMPLE_RATE / blocksize)
+    grace_chunks = int(config.MIN_RECORD_SECONDS * config.SAMPLE_RATE / blocksize)
+    total_chunks = 0
 
-    # 2. Add device=config.MIC_DEVICE so it knows which mic to use
-    with sd.InputStream(
+    buf: list[np.ndarray] = []
+
+    def callback(indata, frames, time_info, status):
+        if status:
+            pass  # ignore non-fatal USB overflow
+        if _muted:
+            return
+        buf.append(indata.copy())
+
+    stream = sd.InputStream(
         device=config.MIC_DEVICE,
         samplerate=config.SAMPLE_RATE,
         channels=1,
         dtype="int16",
-        blocksize=config.CHUNK_SAMPLES,
-    ) as stream:
-        while time.monotonic() < max_end:
-            chunk, status = stream.read(config.CHUNK_SAMPLES)
-            if status:
-                log.warning("Record status: %s", status)
+        blocksize=blocksize,
+        latency="high",
+        callback=callback,
+    )
+    stream.start()
 
-            frames.append(chunk[:, 0].copy())
+    try:
+        while total_chunks < max_chunks:
+            sd.sleep(100)
+            total_chunks += 1
 
-            # Skip silence detection during the grace period so the
-            # user has time to start speaking after the wake word.
-            if time.monotonic() < grace_end:
+            if not buf:
                 continue
 
-            rms = np.sqrt(np.mean(chunk.astype(np.float32) ** 2))
+            # Grab the latest chunk for silence detection
+            recent = buf[-1]
+            audio_buffer.extend(buf)
+            buf.clear()
+
+            # Skip silence detection during grace period
+            if total_chunks < grace_chunks:
+                continue
+
+            rms = np.sqrt(np.mean(recent.astype(np.float32) ** 2)) / 32768.0
             if rms < config.SILENCE_THRESHOLD:
-                if silence_start is None:
-                    silence_start = time.monotonic()
-                elif time.monotonic() - silence_start >= config.SILENCE_DURATION:
+                silence_samples += 1
+                if silence_samples >= silence_samples_needed:
                     log.info("Silence detected, stopping recording.")
                     break
             else:
-                silence_start = None
+                silence_samples = 0
+    finally:
+        stream.stop()
+        stream.close()
 
-    audio = np.concatenate(frames)
+    if not audio_buffer:
+        log.warning("No audio captured.")
+        resume_listening()
+        return np.array([], dtype=np.int16)
+
+    raw_audio = np.concatenate(audio_buffer, axis=0).flatten()
+    normalised = _normalize(raw_audio)
+    # Anti-aliased downsampling 48 kHz → 16 kHz (low-pass filter + decimation)
+    decimated = decimate(normalised, config.DOWNSAMPLE_FACTOR, ftype="fir").astype(
+        np.int16
+    )
+
     log.info(
-        "Recorded %d samples (%.1f s)", len(audio), len(audio) / config.SAMPLE_RATE
+        "Recorded %d samples (%.1f s @ 16 kHz)",
+        len(decimated),
+        len(decimated) / config.WHISPER_SAMPLE_RATE,
     )
 
-    # 3. Restart the wake-word listener so Wiz can hear "Hey Jarvis" again
-    start_listening()
-    
-    return audio
+    # Wake-word listener is resumed from main.py after processing completes
+    return decimated
 
 
 # ---------------------------------------------------------------------------
-# Whisper STT
+# Whisper STT  (whisper.cpp subprocess)
 # ---------------------------------------------------------------------------
-
-
-_whisper_model = None
-
-
-def init_whisper() -> None:
-    """Pre-load the faster-whisper model (call once at startup)."""
-    global _whisper_model
-    from faster_whisper import WhisperModel
-
-    log.info("Loading Whisper model: %s", config.WHISPER_MODEL_NAME)
-    _whisper_model = WhisperModel(
-        config.WHISPER_MODEL_NAME,
-        device="cpu",
-        compute_type="int8",
-    )
 
 
 def transcribe(audio: np.ndarray) -> str:
-    """Downsample 48 kHz int16 → 16 kHz float32 and run Whisper STT."""
-    global _whisper_model
-    if _whisper_model is None:
-        init_whisper()
+    """Save 16 kHz int16 audio to a temp WAV, run whisper-cpp, return text."""
+    if len(audio) == 0:
+        return ""
 
-    # Downsample by factor 3 (48000 → 16000)
-    downsampled = audio[:: config.DOWNSAMPLE_FACTOR]
+    whisper_bin = config.WHISPER_BINARY_PATH
+    if not Path(whisper_bin).exists():
+        raise FileNotFoundError(f"whisper-cpp not found at {whisper_bin}")
 
-    # Normalise to float32 [-1.0, 1.0]
-    audio_f32 = downsampled.astype(np.float32) / 32768.0
+    # Write temp WAV (16 kHz, mono, 16-bit)
+    fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
 
-    log.info("Transcribing %d samples with Whisper…", len(audio_f32))
+    try:
+        with wave.open(tmp_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # 16-bit
+            wf.setframerate(config.WHISPER_SAMPLE_RATE)
+            wf.writeframes(audio.tobytes())
 
-    segments, _info = _whisper_model.transcribe(audio_f32, beam_size=1)
-    text = " ".join(seg.text.strip() for seg in segments).strip()
+        log.info("Transcribing %d samples with whisper-cpp…", len(audio))
 
-    log.info("Transcription: %s", text)
-    return text
+        result = subprocess.run(
+            [
+                whisper_bin,
+                "-m",
+                config.WHISPER_MODEL_PATH,
+                "-f",
+                tmp_path,
+                "-l",
+                "en",
+                "-t",
+                str(config.WHISPER_THREADS),
+                "-bs",
+                str(config.WHISPER_BEAM_SIZE),
+                "--no-timestamps",
+                "-np",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        if result.returncode != 0:
+            log.error("whisper-cpp failed: %s", result.stderr)
+            return ""
+
+        text = result.stdout.strip()
+        text = text.replace("[BLANK_AUDIO]", "").strip()
+        log.info("Transcription: %s", text)
+        return text
+
+    finally:
+        os.unlink(tmp_path)

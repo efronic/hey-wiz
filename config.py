@@ -5,6 +5,7 @@ All tunables are loaded from environment variables with sane defaults.
 
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -27,21 +28,31 @@ WAKE_WORD_THRESHOLD = float(os.getenv("WAKE_WORD_THRESHOLD", "0.5"))
 SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "48000"))  # USB mic native
 WHISPER_SAMPLE_RATE = 16000  # Whisper expects 16 kHz
 DOWNSAMPLE_FACTOR = SAMPLE_RATE // WHISPER_SAMPLE_RATE  # 3
-CHUNK_SAMPLES = 15360  # 320ms buffer to prevent input overflow
-MIC_DEVICE = None  # None = system default; override with int index if needed
+CHUNK_SAMPLES = 3840  # 80ms at 48 kHz → 1280 at 16 kHz (matches pibot)
+MIC_DEVICE = None  # Resolved at runtime; override with int index if needed
 
-SILENCE_THRESHOLD = int(os.getenv("SILENCE_THRESHOLD", "500"))  # RMS value
+# Device names for lookup (survives USB re-enumeration across reboots)
+MIC_NAME = os.getenv("MIC_NAME", "USB PnP Sound Device")
+SPEAKER_NAME = os.getenv("SPEAKER_NAME", "UACDemoV1.0")
+SPEAKER_VOLUME = int(os.getenv("SPEAKER_VOLUME", "75"))  # ALSA PCM volume %
+
+SILENCE_THRESHOLD = float(os.getenv("SILENCE_THRESHOLD", "0.01"))  # normalised RMS
 SILENCE_DURATION = float(os.getenv("SILENCE_DURATION", "1.5"))  # seconds
 MIN_RECORD_SECONDS = float(os.getenv("MIN_RECORD_SECONDS", "2.0"))  # grace period
 MAX_RECORD_SECONDS = int(os.getenv("MAX_RECORD_SECONDS", "30"))
 
+# Adaptive gain normalisation for weak USB mics
+GAIN_TARGET_PEAK = float(os.getenv("GAIN_TARGET_PEAK", "0.9"))
+
 # ---------------------------------------------------------------------------
-# Whisper STT
+# Whisper STT  (whisper.cpp subprocess)
 # ---------------------------------------------------------------------------
-WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "base.en")
+WHISPER_BINARY_PATH = os.getenv("WHISPER_BINARY_PATH", "/usr/local/bin/whisper-cpp")
+WHISPER_THREADS = int(os.getenv("WHISPER_THREADS", "4"))
+WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
 WHISPER_MODEL_PATH = os.getenv(
     "WHISPER_MODEL_PATH",
-    str(MODELS_DIR / "ggml-base.en.bin"),
+    str(MODELS_DIR / "ggml-base.en-q5_0.bin"),
 )
 
 # ---------------------------------------------------------------------------
@@ -101,14 +112,25 @@ OPENCLAW_SESSION_ID = os.getenv("OPENCLAW_SESSION_ID", "wiz-voice")
 OPENCLAW_TIMEOUT = int(os.getenv("OPENCLAW_TIMEOUT", "60"))
 
 # ---------------------------------------------------------------------------
-# Piper TTS
+# Piper TTS  (in-process via piper-tts Python package)
 # ---------------------------------------------------------------------------
-PIPER_BINARY = os.getenv("PIPER_BINARY", "piper")
 PIPER_MODEL_PATH = os.getenv(
     "PIPER_MODEL_PATH",
     str(MODELS_DIR / "en_US-lessac-medium.onnx"),
 )
 MAX_TTS_CHARS = int(os.getenv("MAX_TTS_CHARS", "500"))
+
+# ---------------------------------------------------------------------------
+# Filler phrases (pre-generated WAVs played while processing)
+# ---------------------------------------------------------------------------
+FILLER_DIR = PROJECT_DIR / "assets" / "fillers"
+FILLER_PHRASES = [
+    "On it!",
+    "Thinking...",
+    "Give me a sec.",
+    "Let me check.",
+    "Working on it.",
+]
 
 # ---------------------------------------------------------------------------
 # Capture

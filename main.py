@@ -6,7 +6,6 @@ Orchestrates: wake word → record → transcribe → brain bridge → speak.
 import asyncio
 import logging
 import signal
-import sys
 
 import audio_pipeline
 import brain_bridge
@@ -36,8 +35,13 @@ def main() -> None:
 
     # One-time model loading
     audio_pipeline.init()
-    audio_pipeline.start_listening()
+    voice_output.init()
 
+    # Speak greeting BEFORE starting wake word detection so the
+    # assistant's own voice doesn't trigger the detector.
+    voice_output.speak("Hello! I'm Wiz. Say hey Jarvis to get my attention.")
+
+    audio_pipeline.start_listening()
     log.info("Listening for wake word. Say 'Hey Jarvis' to begin.")
 
     while not _shutdown:
@@ -49,10 +53,20 @@ def main() -> None:
 
         try:
             audio = audio_pipeline.record_command()
+
+            if len(audio) == 0:
+                voice_output.speak("Sorry, I didn't catch that.")
+                audio_pipeline.resume_listening()
+                continue
+
+            # Play filler while processing to reduce perceived latency
+            voice_output.speak_filler()
+
             text = audio_pipeline.transcribe(audio)
 
             if not text:
                 voice_output.speak("Sorry, I didn't catch that.")
+                audio_pipeline.resume_listening()
                 continue
 
             log.info("User said: %s", text)
@@ -62,6 +76,9 @@ def main() -> None:
         except Exception:
             log.exception("Pipeline error")
             voice_output.speak("Something went wrong. Please try again.")
+
+        # Resume wake-word detection after the full cycle completes
+        audio_pipeline.resume_listening()
 
     log.info("=== wiz-voice stopped ===")
 

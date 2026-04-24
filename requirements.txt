@@ -1,9 +1,10 @@
 openwakeword
 sounddevice
 numpy
-faster-whisper
+scipy
 picamera2
 httpx
 websockets
 python-dotenv
 piper-tts
+onnxruntime

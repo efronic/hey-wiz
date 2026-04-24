@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
 import re
-import asyncio
 import uuid
 
 import httpx
@@ -23,6 +23,7 @@ VISION_API_TIMEOUT = 30.0
 # Tag matching
 # ---------------------------------------------------------------------------
 
+
 def _match_command_tag(text: str) -> tuple[dict, str] | tuple[None, str]:
     """Check whether *text* starts with a known command-tag trigger.
 
@@ -35,7 +36,7 @@ def _match_command_tag(text: str) -> tuple[dict, str] | tuple[None, str]:
             pattern = re.compile(rf"^{re.escape(trigger)}\b[,:\s]*", re.IGNORECASE)
             m = pattern.match(lower)
             if m:
-                remainder = text[m.end():].strip()
+                remainder = text[m.end() :].strip()
                 log.info("Matched command tag '%s' (trigger='%s')", tag_name, trigger)
                 return tag_cfg, remainder
     return None, text
@@ -44,6 +45,7 @@ def _match_command_tag(text: str) -> tuple[dict, str] | tuple[None, str]:
 # ---------------------------------------------------------------------------
 # Vision API
 # ---------------------------------------------------------------------------
+
 
 async def _call_vision_api(image_path: str, vision_prompt: str) -> str:
     """Send image to the configured Vision API and return the description."""
@@ -131,6 +133,7 @@ async def _call_openai(image_b64: str, vision_prompt: str) -> str:
 # OpenClaw gateway WebSocket client
 # ---------------------------------------------------------------------------
 
+
 async def _gw_connect() -> websockets.WebSocketClientProtocol:
     """Open an authenticated WebSocket to the OpenClaw gateway."""
     ws = await websockets.connect(
@@ -144,25 +147,29 @@ async def _gw_connect() -> websockets.WebSocketClientProtocol:
         raise RuntimeError(f"Unexpected gateway greeting: {challenge}")
 
     req_id = str(uuid.uuid4())
-    await ws.send(json.dumps({
-        "type": "req",
-        "id": req_id,
-        "method": "connect",
-        "params": {
-            "minProtocol": 3,
-            "maxProtocol": 3,
-            "client": {
-                "id": "openclaw-control-ui",
-                "version": "1.0.0",
-                "platform": "linux-aarch64",
-                "mode": "webchat",
-            },
-            "role": "operator",
-            "scopes": ["operator.read", "operator.write", "operator.admin"],
-            "auth": {"token": config.OPENCLAW_TOKEN},
-            "caps": [],
-        },
-    }))
+    await ws.send(
+        json.dumps(
+            {
+                "type": "req",
+                "id": req_id,
+                "method": "connect",
+                "params": {
+                    "minProtocol": 3,
+                    "maxProtocol": 3,
+                    "client": {
+                        "id": "openclaw-control-ui",
+                        "version": "1.0.0",
+                        "platform": "linux-aarch64",
+                        "mode": "webchat",
+                    },
+                    "role": "operator",
+                    "scopes": ["operator.read", "operator.write", "operator.admin"],
+                    "auth": {"token": config.OPENCLAW_TOKEN},
+                    "caps": [],
+                },
+            }
+        )
+    )
     resp = json.loads(await ws.recv())
     if not resp.get("ok"):
         err = resp.get("error", {}).get("message", "unknown")
@@ -181,17 +188,21 @@ async def _call_openclaw(prompt: str) -> str:
 
     try:
         chat_id = str(uuid.uuid4())
-        await ws.send(json.dumps({
-            "type": "req",
-            "id": chat_id,
-            "method": "chat.send",
-            "params": {
-                "sessionKey": f"agent:main:explicit:{config.OPENCLAW_SESSION_ID}",
-                "message": prompt,
-                "deliver": False,
-                "idempotencyKey": str(uuid.uuid4()),
-            },
-        }))
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "req",
+                    "id": chat_id,
+                    "method": "chat.send",
+                    "params": {
+                        "sessionKey": f"agent:main:explicit:{config.OPENCLAW_SESSION_ID}",
+                        "message": prompt,
+                        "deliver": False,
+                        "idempotencyKey": str(uuid.uuid4()),
+                    },
+                }
+            )
+        )
 
         # Listen for the assistant's final message
         deadline = asyncio.get_event_loop().time() + config.OPENCLAW_TIMEOUT
@@ -235,6 +246,7 @@ async def _call_openclaw(prompt: str) -> str:
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
 
 async def process(transcription: str) -> str:
     """Route a transcription through the tag system and OpenClaw.
